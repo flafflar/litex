@@ -18,6 +18,7 @@ from litex.gen.fhdl import verilog
 
 from litex.build.io import CRG
 from litex.build import tools
+from litex.build.bundle import remap_path
 from litex.build.generic_toolchain import GenericToolchain
 
 # --------------------------------------------------------------------------------------------------
@@ -429,7 +430,7 @@ class GenericPlatform:
                 pass
 
     def add_source(self, filename, language=None, library=None, copy=False):
-        filename = os.path.abspath(filename)
+        filename = os.path.abspath(remap_path(filename))
         if language is None:
             language = tools.language_by_filename(filename)
         if library is None:
@@ -447,6 +448,7 @@ class GenericPlatform:
             self.add_source(os.path.join(path, f), language, library, copy)
 
     def add_source_dir(self, path, recursive=True, language=None, library=None):
+        path = remap_path(path)
         dir_files = []
         if recursive:
             for root, dirs, files in os.walk(path):
@@ -464,7 +466,7 @@ class GenericPlatform:
                 self.add_source(filename, _language, library)
 
     def add_verilog_include_path(self, path):
-        self.verilog_include_paths.append(os.path.abspath(path))
+        self.verilog_include_paths.append(os.path.abspath(remap_path(path)))
 
     def resolve_signals(self, vns):
         # Resolve signal names in constraints.
