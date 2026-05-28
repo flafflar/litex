@@ -23,7 +23,7 @@ new file mode 100644
 index 0000000..cb0a3c1
 --- /dev/null
 +++ b/hw/riscv/litex_sim.c
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,587 @@
 +/*
 + * QEMU RISC-V LiteX SIM co-simulation machine
 + *
@@ -53,6 +53,7 @@ index 0000000..cb0a3c1
 +#include "qemu/timer.h"
 +#include "qemu/units.h"
 +#include "qom/object.h"
++#include "sysemu/runstate.h"
 +#include "target/riscv/cpu.h"
 +
 +#define TYPE_LITEX_SIM_MACHINE MACHINE_TYPE_NAME("litex-sim")
@@ -181,6 +182,15 @@ index 0000000..cb0a3c1
 +                             BOOL_TO_MASK(level));
 +    }
 +    s->irq_mask = irq_mask;
++}
++
++static void litex_sim_update_reset(LiteXSimMachineState *s,
++                                   uint64_t reset_status)
++{
++    if (reset_status & 1) {
++        s->irq_mask = 0;
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++    }
 +}
 +
 +static bool litex_sim_bridge_xfer_once(LiteXSimMachineState *s,
@@ -335,6 +345,8 @@ index 0000000..cb0a3c1
 +                error_free(err);
 +            }
 +            litex_sim_close_bridge(s);
++        } else if (status == 0) {
++            litex_sim_update_reset(s, rdata);
 +        }
 +        s->bridge_busy = false;
 +    }

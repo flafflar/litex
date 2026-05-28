@@ -63,6 +63,7 @@ struct session_s {
   uint8_t  *err;
   uint8_t  *sys_clk;
   uint32_t *irq;
+  uint8_t  *reset;
 
   clk_edge_state_t clk_edge;
 
@@ -75,6 +76,7 @@ struct session_s {
 
   int req_valid;
   int active;
+  int reset_latched;
   struct qemu_wb_request_s req;
   struct qemu_wb_txn_s txns[4];
   int txn_count;
@@ -187,6 +189,21 @@ static void qemu_wishbone_drive_idle(struct session_s *s)
 static uint32_t qemu_wishbone_irq(struct session_s *s)
 {
   return s->irq ? *s->irq : 0;
+}
+
+static void qemu_wishbone_latch_reset(struct session_s *s)
+{
+  if (s->reset && *s->reset) {
+    s->reset_latched = 1;
+  }
+}
+
+static uint64_t qemu_wishbone_reset_status(struct session_s *s)
+{
+  uint64_t reset = s->reset_latched || (s->reset && *s->reset);
+
+  s->reset_latched = 0;
+  return reset;
 }
 
 static void qemu_wishbone_close_client(struct session_s *s)
@@ -409,6 +426,8 @@ static int qemu_wishbone_add_pads(void *sess, struct pad_list_s *plist)
     ret |= litex_sim_module_pads_get(pads, "err",   (void **)&s->err);
   } else if (!strcmp(plist->name, "qemu_irq")) {
     ret |= litex_sim_module_pads_get(pads, "qemu_irq", (void **)&s->irq);
+  } else if (!strcmp(plist->name, "qemu_reset")) {
+    ret |= litex_sim_module_pads_get(pads, "qemu_reset", (void **)&s->reset);
   } else if (!strcmp(plist->name, "sys_clk")) {
     ret |= litex_sim_module_pads_get(pads, "sys_clk", (void **)&s->sys_clk);
   }
@@ -496,6 +515,7 @@ static int qemu_wishbone_tick(void *sess, uint64_t time_ps)
   if (!s || !s->sys_clk || !clk_pos_edge(&s->clk_edge, *s->sys_clk)) {
     return RC_OK;
   }
+  qemu_wishbone_latch_reset(s);
 
   if (s->active && (*s->ack || *s->err)) {
     if (*s->err) {
@@ -517,7 +537,7 @@ static int qemu_wishbone_tick(void *sess, uint64_t time_ps)
 
   if (!s->active && s->req_valid) {
     if (s->req.op == QEMU_WB_OP_IRQ) {
-      qemu_wishbone_send_response(s, QEMU_WB_STATUS_OK, 0);
+      qemu_wishbone_send_response(s, QEMU_WB_STATUS_OK, qemu_wishbone_reset_status(s));
       s->req_valid = 0;
     } else if (qemu_wishbone_build_txns(s) != RC_OK) {
       qemu_wishbone_send_response(s, QEMU_WB_STATUS_BAD_REQ, 0);

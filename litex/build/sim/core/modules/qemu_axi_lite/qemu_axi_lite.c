@@ -72,6 +72,7 @@ struct session_s {
   uint32_t *rdata;
   uint8_t  *sys_clk;
   uint32_t *irq;
+  uint8_t  *reset;
 
   clk_edge_state_t clk_edge;
 
@@ -84,6 +85,7 @@ struct session_s {
 
   int req_valid;
   int active;
+  int reset_latched;
   int aw_done;
   int w_done;
   int b_seen;
@@ -208,6 +210,21 @@ static void qemu_axi_lite_drive_idle(struct session_s *s)
 static uint32_t qemu_axi_lite_irq(struct session_s *s)
 {
   return s->irq ? *s->irq : 0;
+}
+
+static void qemu_axi_lite_latch_reset(struct session_s *s)
+{
+  if (s->reset && *s->reset) {
+    s->reset_latched = 1;
+  }
+}
+
+static uint64_t qemu_axi_lite_reset_status(struct session_s *s)
+{
+  uint64_t reset = s->reset_latched || (s->reset && *s->reset);
+
+  s->reset_latched = 0;
+  return reset;
 }
 
 static void qemu_axi_lite_close_client(struct session_s *s)
@@ -438,6 +455,8 @@ static int qemu_axi_lite_add_pads(void *sess, struct pad_list_s *plist)
     ret |= litex_sim_module_pads_get(pads, "rdata",   (void **)&s->rdata);
   } else if (!strcmp(plist->name, "qemu_irq")) {
     ret |= litex_sim_module_pads_get(pads, "qemu_irq", (void **)&s->irq);
+  } else if (!strcmp(plist->name, "qemu_reset")) {
+    ret |= litex_sim_module_pads_get(pads, "qemu_reset", (void **)&s->reset);
   } else if (!strcmp(plist->name, "sys_clk")) {
     ret |= litex_sim_module_pads_get(pads, "sys_clk", (void **)&s->sys_clk);
   }
@@ -566,6 +585,7 @@ static int qemu_axi_lite_tick(void *sess, uint64_t time_ps)
   if (!s || !s->sys_clk || !clk_pos_edge(&s->clk_edge, *s->sys_clk)) {
     return RC_OK;
   }
+  qemu_axi_lite_latch_reset(s);
 
   if (s->active && s->req.op == QEMU_AXI_LITE_OP_WRITE) {
     int aw_valid = !s->aw_done;
@@ -604,7 +624,7 @@ static int qemu_axi_lite_tick(void *sess, uint64_t time_ps)
 
   if (!s->active && s->req_valid) {
     if (s->req.op == QEMU_AXI_LITE_OP_IRQ) {
-      qemu_axi_lite_send_response(s, QEMU_AXI_LITE_STATUS_OK, 0);
+      qemu_axi_lite_send_response(s, QEMU_AXI_LITE_STATUS_OK, qemu_axi_lite_reset_status(s));
       s->req_valid = 0;
     } else if (qemu_axi_lite_build_txns(s) != RC_OK) {
       qemu_axi_lite_send_response(s, QEMU_AXI_LITE_STATUS_BAD_REQ, 0);

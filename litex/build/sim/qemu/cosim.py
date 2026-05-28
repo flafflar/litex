@@ -130,7 +130,7 @@ def qemu_shared_ram_module(bus_standard):
 
 def qemu_add_sim_modules(sim_config, args, parser):
     qemu_module, qemu_interface = qemu_bridge_module(args.bus_standard)
-    sim_config.add_module(qemu_module, [qemu_interface, "qemu_irq"], clocks="sys_clk", args={
+    sim_config.add_module(qemu_module, [qemu_interface, "qemu_irq", "qemu_reset"], clocks="sys_clk", args={
         "bind" : args.qemu_bind,
         "port" : args.qemu_port,
     })

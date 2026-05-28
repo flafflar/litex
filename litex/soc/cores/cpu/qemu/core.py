@@ -134,8 +134,10 @@ class QEMU(CPU):
     def _add_sim_pads(self, platform, name):
         platform.add_extension(self.bus.get_ios(name))
         platform.add_extension([("qemu_irq", 0, Pins(len(self.interrupt)))])
+        platform.add_extension([("qemu_reset", 0, Pins(1))])
         self.comb += self.bus.connect_to_pads(platform.request(name), mode="slave")
         self.comb += platform.request("qemu_irq").eq(self.interrupt)
+        self.comb += platform.request("qemu_reset").eq(self.reset)
 
     def set_reset_address(self, reset_address):
         self.reset_address = reset_address

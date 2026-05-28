@@ -178,6 +178,7 @@ The QEMU `litex-sim` machine should:
 - Update QEMU PLIC inputs from the `irq` field returned with each response.
 - Poll the bridge with `op=2` when `irq-poll-us` is non-zero, so LiteX-originated
   interrupts can wake QEMU even when the CPU is not otherwise touching MMIO.
+- Reset the QEMU CPU when an IRQ poll reports a latched LiteX CPU reset.
 
 ## Protocol
 
@@ -205,9 +206,10 @@ Response, 32 bytes:
 | 6      | status  | 2    | `0` ok, `1` Wishbone error, `2` bad request |
 | 8      | irq     | 4    | current LiteX interrupt bitmask |
 | 12     | reserved| 4    | `0` |
-| 16     | data    | 8    | read data, little-endian |
+| 16     | data    | 8    | read data, or reset status for IRQ poll |
 | 24     | reserved| 8    | `0` |
 
 For an IRQ poll request, QEMU sends `op=2`, `size=0`, `addr=0`, and `data=0`.
 The LiteX simulation module replies immediately without issuing a bus
-transaction; only the response `irq` mask is significant.
+transaction. The response `irq` mask carries the current LiteX interrupt pins,
+and response `data[0]` reports a latched LiteX CPU reset request.
