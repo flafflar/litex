@@ -92,10 +92,11 @@ python3 -m litex.tools.litex_sim \
   --no-compile
 ```
 
-For an end-to-end LiteX simulation endpoint, configure the usual `tap0`
-interface for the simulator side, then run the same command without
-`--no-compile`. The simulated SoC defaults to `192.168.1.50`, while the host
-side defaults to `192.168.1.100`.
+For an end-to-end LiteX simulation endpoint, run the same command without
+`--no-compile`. The simulator Ethernet module creates and configures the usual
+`tap0` interface at runtime through `tapcfg`, so the simulator must be allowed
+to create/configure TAP devices. The simulated SoC defaults to `192.168.1.50`,
+while the host side defaults to `192.168.1.100`.
 
 For a board target, use the same CPU type with the target's Ethernet PHY and
 Etherbone options. The `qemu_remote` CPU does not instantiate a hardware CPU
