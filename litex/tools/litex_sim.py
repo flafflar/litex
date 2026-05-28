@@ -11,11 +11,6 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 import os
-import sys
-import json
-import shlex
-import shutil
-import argparse
 import subprocess
 
 from migen import *
@@ -23,6 +18,8 @@ from migen import *
 from litex.build.generic_platform import *
 from litex.build.sim              import SimPlatform
 from litex.build.sim.config       import SimConfig
+from litex.build.sim.qemu.cosim   import qemu_add_args, qemu_configure, qemu_add_sim_modules
+from litex.build.sim.qemu.cosim   import qemu_add_shared_ram, qemu_command, qemu_spawn_when_bridge_ready
 
 from litex.soc.integration.common   import *
 from litex.soc.integration.soc_core import *
@@ -427,146 +424,6 @@ def generate_gtkw_savefile(builder, vns, trace_fst):
             dfi_group("dfi commands", ["wrdata_mask"])
             dfi_group("dfi commands", ["rddata"])
 
-def _qemu_xlen(cpu_variant):
-    return 64 if cpu_variant == "rv64" else 32
-
-def _qemu_default_binary(cpu_variant):
-    name = "qemu-system-riscv{}".format(_qemu_xlen(cpu_variant))
-    repo_binary = os.path.abspath(os.path.join(
-        os.path.dirname(__file__),
-        "..", "..",
-        "build", "qemu-litex", "bin",
-        name,
-    ))
-    return repo_binary if os.path.exists(repo_binary) else name
-
-def _qemu_machine_arg(soc, args):
-    def region_origin(name, default=0):
-        if name in soc.bus.regions:
-            return soc.bus.regions[name].origin
-        return soc.mem_map.get(name, default)
-
-    def region_size(name, default=0):
-        if name in soc.bus.regions:
-            return soc.bus.regions[name].size
-        return default
-
-    cpu_variant = "rv32" if args.cpu_variant in [None, "standard"] else args.cpu_variant
-    props = [
-        "litex-sim",
-        "xlen={}".format(_qemu_xlen(cpu_variant)),
-        "bridge-host={}".format(args.qemu_bind),
-        "bridge-port={}".format(args.qemu_port),
-        "reset-addr=0x{:x}".format(getattr(soc.cpu, "reset_address", region_origin("rom"))),
-        "rom-base=0x{:x}".format(region_origin("rom")),
-        "sram-base=0x{:x}".format(region_origin("sram")),
-        "main-ram-base=0x{:x}".format(region_origin("main_ram")),
-        "csr-base=0x{:x}".format(region_origin("csr")),
-        "csr-size=0x{:x}".format(region_size("csr")),
-    ]
-    if getattr(args, "qemu_shared_ram_enabled", False):
-        props.append("memory-backend=litex_main_ram")
-    return ",".join(props)
-
-def _qemu_shared_ram_default_path(args):
-    return os.path.abspath(os.path.join(args.output_dir, "qemu-main-ram.bin"))
-
-def _qemu_shared_ram_path(args):
-    return os.path.abspath(args.qemu_shared_ram_path or _qemu_shared_ram_default_path(args))
-
-def _prepare_qemu_shared_ram_file(path, size, init_data=None, data_width=32):
-    bytes_per_data = data_width//8
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.truncate(size)
-
-    if not init_data:
-        return
-
-    with open(path, "r+b") as f:
-        for n, data in enumerate(init_data):
-            offset = n*bytes_per_data
-            if offset + bytes_per_data > size:
-                raise ValueError("RAM init data is larger than QEMU shared RAM.")
-            f.seek(offset)
-            f.write(int(data).to_bytes(bytes_per_data, byteorder="little"))
-
-def _qemu_command(builder, soc, args):
-    cpu_variant = "rv32" if args.cpu_variant in [None, "standard"] else args.cpu_variant
-    qemu_binary = args.qemu_binary or _qemu_default_binary(cpu_variant)
-    qemu_ram_size = args.qemu_ram_size or args.integrated_main_ram_size or 64*1024*1024
-    bios = args.qemu_firmware
-    if bios is None:
-        bios = args.rom_init or builder.get_bios_filename()
-
-    cmd = [qemu_binary]
-    if getattr(args, "qemu_shared_ram_enabled", False):
-        cmd += [
-            "-object",
-            "memory-backend-file,id=litex_main_ram,mem-path={},size={},share=on".format(
-                args.qemu_shared_ram_path_resolved,
-                qemu_ram_size,
-            ),
-        ]
-    cmd += [
-        "-M", _qemu_machine_arg(soc, args),
-        "-m", "{}B".format(qemu_ram_size),
-        "-nographic",
-        "-serial", "none",
-        "-monitor", "none",
-    ]
-    if bios:
-        cmd += ["-bios", bios]
-    if args.qemu_kernel:
-        cmd += ["-kernel", args.qemu_kernel]
-    if args.qemu_dtb:
-        cmd += ["-dtb", args.qemu_dtb]
-    if args.qemu_initrd:
-        cmd += ["-initrd", args.qemu_initrd]
-    if args.qemu_append:
-        cmd += ["-append", args.qemu_append]
-    if args.qemu_extra_args:
-        cmd += shlex.split(args.qemu_extra_args)
-    return cmd
-
-def _spawn_qemu_when_bridge_ready(cmd, host, port, timeout):
-    waiter = r"""
-import json
-import os
-import socket
-import sys
-import time
-
-cmd = json.loads(sys.argv[1])
-host = sys.argv[2]
-port = int(sys.argv[3])
-timeout = float(sys.argv[4])
-deadline = None if timeout <= 0 else time.time() + timeout
-
-while True:
-    try:
-        s = socket.create_connection((host, port), timeout=0.25)
-        s.close()
-        break
-    except OSError:
-        if deadline is not None and time.time() >= deadline:
-            print("[litex_sim] ERROR: timed out waiting for qemu_wishbone bridge", file=sys.stderr)
-            sys.exit(1)
-        time.sleep(0.05)
-
-print("[litex_sim] Starting QEMU: {}".format(" ".join(cmd)))
-os.execvp(cmd[0], cmd)
-"""
-    return subprocess.Popen([
-        sys.executable,
-        "-c", waiter,
-        json.dumps(cmd),
-        host,
-        str(port),
-        str(timeout),
-    ])
-
 def sim_args(parser):
     # ROM / RAM.
     parser.add_argument("--rom-init",             default=None,            help="ROM init file (.bin or .json).")
@@ -609,20 +466,7 @@ def sim_args(parser):
     parser.add_argument("--with-jtagremote",      action="store_true", help="Enable jtagremote support")
 
     # QEMU co-simulation.
-    parser.add_argument("--qemu-bind",         default="127.0.0.1", help="Bind address for the QEMU Wishbone bridge.")
-    parser.add_argument("--qemu-port",         default=1235, type=int, help="TCP port for the QEMU Wishbone bridge.")
-    parser.add_argument("--qemu-binary",       default=None, help="QEMU binary to launch (default: qemu-system-riscv32/64).")
-    parser.add_argument("--qemu-firmware",     default=None, help="Firmware/BIOS passed to QEMU -bios; use 'none' to disable.")
-    parser.add_argument("--qemu-kernel",       default=None, help="Kernel image passed to QEMU -kernel.")
-    parser.add_argument("--qemu-dtb",          default=None, help="Device tree blob passed to QEMU -dtb.")
-    parser.add_argument("--qemu-initrd",       default=None, help="Initrd image passed to QEMU -initrd.")
-    parser.add_argument("--qemu-append",       default=None, help="Kernel command line passed to QEMU -append.")
-    parser.add_argument("--qemu-ram-size",     default=None, type=auto_int, help="QEMU RAM size in bytes.")
-    parser.add_argument("--qemu-shared-ram-path", default=None,        help="Shared RAM backing file used with QEMU integrated main RAM.")
-    parser.add_argument("--qemu-no-shared-ram",   action="store_true", help="Disable shared QEMU/Verilator backing for integrated main RAM.")
-    parser.add_argument("--qemu-extra-args",   default="", help="Extra arguments appended to the QEMU command line.")
-    parser.add_argument("--qemu-wait-timeout", default=120.0, type=float, help="Seconds to wait for the QEMU bridge before launching QEMU; <= 0 waits forever.")
-    parser.add_argument("--qemu-no-run",       action="store_true", help="Do not auto-launch QEMU when using --cpu-type=qemu.")
+    qemu_add_args(parser)
 
     # GPIO.
     parser.add_argument("--with-gpio",            action="store_true",     help="Enable Tristate GPIO (32 pins).")
@@ -656,17 +500,7 @@ def main():
         parser.error("--sim-speed-interval must be greater than 0.")
 
     soc_kwargs = soc_core_argdict(args)
-    qemu_enabled = soc_kwargs.get("cpu_type", None) == "qemu"
-    args.qemu_shared_ram_enabled = (
-        qemu_enabled and
-        bool(args.integrated_main_ram_size) and
-        not args.qemu_no_shared_ram
-    )
-    args.qemu_shared_ram_path_resolved = _qemu_shared_ram_path(args)
-    if args.qemu_shared_ram_enabled:
-        if args.qemu_ram_size is not None and args.qemu_ram_size != args.integrated_main_ram_size:
-            parser.error("--qemu-ram-size must match --integrated-main-ram-size when shared RAM is enabled.")
-        soc_kwargs["integrated_main_ram_size"] = 0
+    qemu_enabled = qemu_configure(args, parser, soc_kwargs)
 
     sys_clk_freq = int(1e6)
     sim_config           = SimConfig()
@@ -703,20 +537,7 @@ def main():
 
     # QEMU co-simulation bridge.
     if qemu_enabled:
-        sim_config.add_module("qemu_wishbone", ["qemu_wishbone", "qemu_irq"], clocks="sys_clk", args={
-            "bind" : args.qemu_bind,
-            "port" : args.qemu_port,
-        })
-        if args.qemu_shared_ram_enabled:
-            sim_config.add_module("qemu_shared_ram", "qemu_shared_ram", clocks="sys_clk", args={
-                "path" : args.qemu_shared_ram_path_resolved,
-                "size" : args.integrated_main_ram_size,
-            })
-        if not args.qemu_no_run:
-            qemu_variant = "rv32" if args.cpu_variant in [None, "standard"] else args.cpu_variant
-            qemu_binary = args.qemu_binary or _qemu_default_binary(qemu_variant)
-            if shutil.which(qemu_binary) is None and not os.path.exists(qemu_binary):
-                parser.error("{} not found; install a patched QEMU or use --qemu-no-run.".format(qemu_binary))
+        qemu_add_sim_modules(sim_config, args, parser)
 
     # Create config SoC that will be used to prepare/configure real one.
     conf_soc = SimSoC(**soc_kwargs)
@@ -812,20 +633,12 @@ def main():
         spi_flash_init         = None if args.spi_flash_init is None else get_mem_data(args.spi_flash_init, endianness="big"),
         **soc_kwargs)
     if args.qemu_shared_ram_enabled:
-        from litex.soc.cores.cpu.qemu.core import QEMUSharedRAM
-        _prepare_qemu_shared_ram_file(
-            path       = args.qemu_shared_ram_path_resolved,
-            size       = args.integrated_main_ram_size,
+        qemu_add_shared_ram(
+            soc        = soc,
+            args       = args,
             init_data  = main_ram_init,
             data_width = conf_soc.bus.data_width,
         )
-        soc.add_module(name="main_ram", module=QEMUSharedRAM(soc.platform))
-        soc.bus.add_slave(name="main_ram", slave=soc.main_ram.bus, region=SoCRegion(
-            origin = soc.mem_map["main_ram"],
-            size   = args.integrated_main_ram_size,
-            mode   = "rwx",
-        ))
-        soc.integrated_main_ram_size = args.integrated_main_ram_size
     if ram_boot_address is not None:
         if ram_boot_address == 0:
             ram_boot_address = conf_soc.mem_map["main_ram"]
@@ -844,9 +657,9 @@ def main():
         if args.trace:
             generate_gtkw_savefile(builder, vns, args.trace_fst)
         if qemu_enabled and not args.qemu_no_run:
-            qemu_cmd = _qemu_command(builder, soc, args)
+            qemu_cmd = qemu_command(builder, soc, args)
             print("[litex_sim] QEMU command: {}".format(" ".join(qemu_cmd)))
-            qemu_proc = _spawn_qemu_when_bridge_ready(
+            qemu_proc = qemu_spawn_when_bridge_ready(
                 cmd     = qemu_cmd,
                 host    = args.qemu_bind,
                 port    = args.qemu_port,
