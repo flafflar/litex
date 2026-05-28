@@ -31,6 +31,17 @@ def qemu_default_binary(cpu_variant):
     return repo_binary if os.path.exists(repo_binary) else name
 
 
+def qemu_resolve_binary(binary, cpu_variant):
+    binary = binary or qemu_default_binary(cpu_variant)
+    return os.path.abspath(binary) if os.path.exists(binary) else binary
+
+
+def qemu_binary(args):
+    if hasattr(args, "qemu_binary_resolved"):
+        return args.qemu_binary_resolved
+    return qemu_resolve_binary(args.qemu_binary, qemu_variant(args))
+
+
 def qemu_variant(args):
     return "rv32" if args.cpu_variant in [None, "standard"] else args.cpu_variant
 
@@ -91,6 +102,7 @@ def qemu_configure(args, parser, soc_kwargs):
         not args.qemu_no_shared_ram
     )
     args.qemu_shared_ram_path_resolved = qemu_shared_ram_path(args)
+    args.qemu_binary_resolved          = qemu_resolve_binary(args.qemu_binary, qemu_variant(args))
     if args.qemu_shared_ram_enabled:
         if args.qemu_ram_size is not None and args.qemu_ram_size != args.integrated_main_ram_size:
             parser.error("--qemu-ram-size must match --integrated-main-ram-size when shared RAM is enabled.")
@@ -129,9 +141,9 @@ def qemu_add_sim_modules(sim_config, args, parser):
             "size" : args.integrated_main_ram_size,
         })
     if not args.qemu_no_run:
-        qemu_binary = args.qemu_binary or qemu_default_binary(qemu_variant(args))
-        if shutil.which(qemu_binary) is None and not os.path.exists(qemu_binary):
-            parser.error("{} not found; install a patched QEMU or use --qemu-no-run.".format(qemu_binary))
+        binary = qemu_binary(args)
+        if shutil.which(binary) is None and not os.path.exists(binary):
+            parser.error("{} not found; install a patched QEMU or use --qemu-no-run.".format(binary))
 
 
 def qemu_add_shared_ram(soc, args, init_data=None, data_width=32):
@@ -197,13 +209,12 @@ def qemu_machine_arg(soc, args):
 
 
 def qemu_command(builder, soc, args):
-    qemu_binary   = args.qemu_binary or qemu_default_binary(qemu_variant(args))
     qemu_ram_size = args.qemu_ram_size or args.integrated_main_ram_size or 64*1024*1024
     bios          = args.qemu_firmware
     if bios is None:
         bios = args.rom_init or builder.get_bios_filename()
 
-    cmd = [qemu_binary]
+    cmd = [qemu_binary(args)]
     if getattr(args, "qemu_shared_ram_enabled", False):
         cmd += [
             "-object",
