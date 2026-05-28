@@ -23,7 +23,7 @@ def split_csv(value, supported, name):
     return items
 
 
-def run_smoke(variant, bus_standard, extra_args):
+def run_smoke(variant, bus_standard, extra_args, with_shared_ram=False):
     cmd = [
         sys.executable,
         "-m", "litex.tools.litex_sim",
@@ -33,14 +33,17 @@ def run_smoke(variant, bus_standard, extra_args):
         "--qemu-no-run",
         "--no-compile",
     ] + extra_args
+    if with_shared_ram:
+        cmd += ["--integrated-main-ram-size=0x100000"]
     print("+ {}".format(" ".join(cmd)))
     subprocess.run(cmd, check=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Smoke QEMU CPU with LiteX bus-standard conversions.")
+    parser = argparse.ArgumentParser(description="Smoke QEMU CPU with LiteX bus-standard selections.")
     parser.add_argument("--variants", default="rv32,rv64", help="Comma-separated CPU variants: rv32,rv64.")
     parser.add_argument("--bus-standards", default="wishbone,axi-lite,axi", help="Comma-separated bus standards.")
+    parser.add_argument("--with-shared-ram", action="store_true", help="Also expose QEMU shared main RAM in each bus standard.")
     parser.add_argument("litex_args", nargs=argparse.REMAINDER, help="Extra arguments passed after -- to litex_sim.")
     args = parser.parse_args()
 
@@ -53,6 +56,8 @@ def main():
     for variant in variants:
         for bus_standard in bus_standards:
             run_smoke(variant, bus_standard, extra_args)
+            if args.with_shared_ram:
+                run_smoke(variant, bus_standard, extra_args, with_shared_ram=True)
 
 
 if __name__ == "__main__":

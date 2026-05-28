@@ -66,8 +66,8 @@ def qemu_prepare_shared_ram_file(path, size, init_data=None, data_width=32):
 # Arguments ----------------------------------------------------------------------------------------
 
 def qemu_add_args(parser):
-    parser.add_argument("--qemu-bind",         default="127.0.0.1", help="Bind address for the QEMU Wishbone bridge.")
-    parser.add_argument("--qemu-port",         default=1235, type=int, help="TCP port for the QEMU Wishbone bridge.")
+    parser.add_argument("--qemu-bind",         default="127.0.0.1", help="Bind address for the QEMU transaction bridge.")
+    parser.add_argument("--qemu-port",         default=1235, type=int, help="TCP port for the QEMU transaction bridge.")
     parser.add_argument("--qemu-binary",       default=None, help="QEMU binary to launch (default: qemu-system-riscv32/64).")
     parser.add_argument("--qemu-firmware",     default=None, help="Firmware/BIOS passed to QEMU -bios; use 'none' to disable.")
     parser.add_argument("--qemu-kernel",       default=None, help="Kernel image passed to QEMU -kernel.")
@@ -78,7 +78,7 @@ def qemu_add_args(parser):
     parser.add_argument("--qemu-shared-ram-path", default=None,        help="Shared RAM backing file used with QEMU integrated main RAM.")
     parser.add_argument("--qemu-no-shared-ram",   action="store_true", help="Disable shared QEMU/Verilator backing for integrated main RAM.")
     parser.add_argument("--qemu-extra-args",   default="", help="Extra arguments appended to the QEMU command line.")
-    parser.add_argument("--qemu-wait-timeout", default=120.0, type=float, help="Seconds to wait for the QEMU bridge before launching QEMU; <= 0 waits forever.")
+    parser.add_argument("--qemu-wait-timeout", default=120.0, type=float, help="Seconds to wait for the QEMU transaction bridge before launching QEMU; <= 0 waits forever.")
     parser.add_argument("--qemu-no-run",       action="store_true", help="Do not auto-launch QEMU when using --cpu-type=qemu.")
 
 
@@ -124,7 +124,7 @@ def qemu_add_shared_ram(soc, args, init_data=None, data_width=32):
         init_data  = init_data,
         data_width = data_width,
     )
-    soc.add_module(name="main_ram", module=QEMUSharedRAM(soc.platform))
+    soc.add_module(name="main_ram", module=QEMUSharedRAM(soc.platform, bus_standard=soc.bus.standard))
     soc.bus.add_slave(name="main_ram", slave=soc.main_ram.bus, region=SoCRegion(
         origin = soc.mem_map["main_ram"],
         size   = args.integrated_main_ram_size,
@@ -222,7 +222,7 @@ while True:
         break
     except OSError:
         if deadline is not None and time.time() >= deadline:
-            print("[litex_sim] ERROR: timed out waiting for qemu_wishbone bridge", file=sys.stderr)
+            print("[litex_sim] ERROR: timed out waiting for QEMU transaction bridge", file=sys.stderr)
             sys.exit(1)
         time.sleep(0.05)
 

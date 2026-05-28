@@ -185,6 +185,7 @@ class SimSoC(SoCCore):
 
         # Platform ---------------------------------------------------------------------------------
         platform = Platform()
+        platform.qemu_bus_standard = kwargs.get("bus_standard", "wishbone")
 
         # Parameters -------------------------------------------------------------------------------
         sys_clk_freq = int(1e6)

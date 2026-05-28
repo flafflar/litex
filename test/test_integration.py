@@ -280,12 +280,13 @@ def test_cpu(cpu, request, tmp_path):
     os.environ.get("LITEX_QEMU_COSIM_TEST") != "1",
     reason="QEMU co-simulation test requires a patched QEMU binary.",
 )
-def test_qemu_cpu(tmp_path):
+@pytest.mark.parametrize("bus_standard", ["wishbone", "axi-lite", "axi"])
+def test_qemu_cpu(tmp_path, bus_standard):
     port = _get_free_tcp_port()
     assert boot_test(
         cpu_type="qemu",
         cpu_variant="rv32",
-        args=f"--integrated-main-ram-size=0x100000 --qemu-port={port}",
+        args=f"--bus-standard={bus_standard} --integrated-main-ram-size=0x100000 --qemu-port={port}",
         output_dir=str(tmp_path),
     )
 

@@ -10,7 +10,7 @@ from litex.gen import *
 
 from litex.build.generic_platform import Pins, Subsignal
 
-from litex.soc.interconnect import wishbone
+from litex.soc.interconnect import wishbone, axi
 from litex.soc.cores.cpu import CPU, CPU_GCC_TRIPLE_RISCV32, CPU_GCC_TRIPLE_RISCV64
 
 # Variants -----------------------------------------------------------------------------------------
@@ -25,6 +25,44 @@ GCC_FLAGS = {
 }
 
 # QEMU ---------------------------------------------------------------------------------------------
+
+def _get_qemu_bus_standard(platform):
+    return getattr(platform, "qemu_bus_standard", "wishbone")
+
+
+def _wishbone_master_to_bus(module, wishbone_bus, bus_standard):
+    if bus_standard == "wishbone":
+        return wishbone_bus
+
+    if bus_standard == "axi-lite":
+        axi_lite_bus = axi.AXILiteInterface(data_width=32, address_width=32)
+        module.submodules += axi.Wishbone2AXILite(wishbone_bus, axi_lite_bus)
+        return axi_lite_bus
+
+    if bus_standard == "axi":
+        axi_bus = axi.AXIInterface(data_width=32, address_width=32)
+        module.submodules += axi.Wishbone2AXI(wishbone_bus, axi_bus)
+        return axi_bus
+
+    raise ValueError("Unsupported QEMU bus standard: {}.".format(bus_standard))
+
+
+def _bus_to_wishbone_slave(module, wishbone_bus, bus_standard):
+    if bus_standard == "wishbone":
+        return wishbone_bus
+
+    if bus_standard == "axi-lite":
+        axi_lite_bus = axi.AXILiteInterface(data_width=32, address_width=32)
+        module.submodules += axi.AXILite2Wishbone(axi_lite_bus, wishbone_bus)
+        return axi_lite_bus
+
+    if bus_standard == "axi":
+        axi_bus = axi.AXIInterface(data_width=32, address_width=32)
+        module.submodules += axi.AXI2Wishbone(axi_bus, wishbone_bus)
+        return axi_bus
+
+    raise ValueError("Unsupported QEMU bus standard: {}.".format(bus_standard))
+
 
 class QEMU(CPU):
     category             = "emulator"
@@ -47,9 +85,11 @@ class QEMU(CPU):
         self.xlen     = 64 if variant == "rv64" else 32
         self.reset    = Signal()
 
-        # QEMU drives a single 32-bit Wishbone master into the regular LiteX
-        # interconnect. Wider CPU accesses are split in the simulator bridge.
-        self.bus = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        # The Verilator/QEMU socket module uses single-beat 32-bit Wishbone
+        # transactions. Expose the CPU-side LiteX bus in the requested SoC bus
+        # standard so AXI/AXI-Lite interconnects see a native master.
+        self.wishbone = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        self.bus      = _wishbone_master_to_bus(self, self.wishbone, _get_qemu_bus_standard(platform))
         self.periph_buses = [self.bus]
         self.memory_buses = []
 
@@ -92,7 +132,7 @@ class QEMU(CPU):
         return flags
 
     def _add_sim_pads(self, platform):
-        wb = self.bus
+        wb = self.wishbone
         platform.add_extension([
             ("qemu_wishbone", 0,
                 Subsignal("adr",   Pins(len(wb.adr))),
@@ -121,12 +161,13 @@ class QEMU(CPU):
 # QEMU Shared RAM ----------------------------------------------------------------------------------
 
 class QEMUSharedRAM(LiteXModule):
-    def __init__(self, platform, name="qemu_shared_ram"):
-        self.bus = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+    def __init__(self, platform, name="qemu_shared_ram", bus_standard="wishbone"):
+        self.wishbone = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        self.bus      = _bus_to_wishbone_slave(self, self.wishbone, bus_standard)
         self._add_sim_pads(platform, name)
 
     def _add_sim_pads(self, platform, name):
-        wb = self.bus
+        wb = self.wishbone
         platform.add_extension([
             (name, 0,
                 Subsignal("adr",   Pins(len(wb.adr))),
