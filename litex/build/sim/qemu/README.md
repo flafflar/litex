@@ -98,6 +98,15 @@ For an end-to-end LiteX simulation endpoint, run the same command without
 to create/configure TAP devices. The simulated SoC defaults to `192.168.1.50`,
 while the host side defaults to `192.168.1.100`.
 
+The runtime TAP setup can also be checked with the optional test below. It is
+disabled by default because it needs sudo access to create `tap0`:
+
+```sh
+LITEX_QEMU_ETHERBONE_TAP_TEST=1 \
+python3 -m pytest -q \
+  test/test_qemu_etherbone_bridge.py::TestQEMUEtherboneBridge::test_qemu_remote_etherbone_sim_creates_tap0
+```
+
 For a board target, use the same CPU type with the target's Ethernet PHY and
 Etherbone options. The `qemu_remote` CPU does not instantiate a hardware CPU
 bus master; it only provides the QEMU-compatible memory map, IRQ allocation,

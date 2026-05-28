@@ -6,6 +6,7 @@
 
 import os
 import sys
+import time
 import tempfile
 import unittest
 import subprocess
@@ -137,6 +138,56 @@ class TestQEMUEtherboneBridge(unittest.TestCase):
             self.assertIn("csr_register,cpu_irq,", csr)
             self.assertIn("csr_register,cpu_reset_status,", csr)
             self.assertIn("csr_register,cpu_reset_clear,", csr)
+
+    def test_qemu_remote_etherbone_sim_creates_tap0(self):
+        if os.environ.get("LITEX_QEMU_ETHERBONE_TAP_TEST") != "1":
+            self.skipTest("set LITEX_QEMU_ETHERBONE_TAP_TEST=1 to run the privileged TAP test")
+        if not os.path.exists("/dev/net/tun"):
+            self.skipTest("/dev/net/tun is unavailable")
+        if os.path.exists("/sys/class/net/tap0"):
+            self.skipTest("tap0 already exists")
+        sudo_check = subprocess.run(
+            ["sudo", "-n", "true"],
+            stdout = subprocess.DEVNULL,
+            stderr = subprocess.DEVNULL,
+        )
+        if sudo_check.returncode != 0:
+            self.skipTest("passwordless sudo is required to create tap0")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subprocess.check_call([
+                sys.executable, "-m", "litex.tools.litex_sim",
+                "--cpu-type=qemu_remote",
+                "--cpu-variant=rv64",
+                "--with-etherbone",
+                "--output-dir={}".format(tmp_dir),
+                "--opt-level=O0",
+                "--no-compile-gateware",
+                "--non-interactive",
+            ])
+            gateware_dir = os.path.join(tmp_dir, "gateware")
+            subprocess.check_call(["bash", "build_sim.sh"], cwd=gateware_dir)
+
+            sim = os.path.join(gateware_dir, "obj_dir", "Vsim")
+            proc = subprocess.Popen(
+                ["sudo", "-n", "timeout", "10s", sim],
+                cwd=gateware_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            tap_seen = False
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if os.path.exists("/sys/class/net/tap0"):
+                    tap_seen = True
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            output, _ = proc.communicate(timeout=15)
+
+            self.assertTrue(tap_seen, "tap0 was not created; simulator output:\n{}".format(output))
 
 
 if __name__ == "__main__":
