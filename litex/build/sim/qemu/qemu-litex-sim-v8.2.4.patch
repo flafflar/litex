@@ -3,23 +3,27 @@ new file mode 100644
 index 0000000..51b51a1
 --- /dev/null
 +++ b/configs/devices/riscv32-softmmu/litex-sim.mak
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,4 @@
 +CONFIG_SEMIHOSTING=y
 +CONFIG_ARM_COMPATIBLE_SEMIHOSTING=y
++CONFIG_RISCV_ACLINT=y
++CONFIG_SIFIVE_PLIC=y
 diff --git a/configs/devices/riscv64-softmmu/litex-sim.mak b/configs/devices/riscv64-softmmu/litex-sim.mak
 new file mode 100644
 index 0000000..51b51a1
 --- /dev/null
 +++ b/configs/devices/riscv64-softmmu/litex-sim.mak
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,4 @@
 +CONFIG_SEMIHOSTING=y
 +CONFIG_ARM_COMPATIBLE_SEMIHOSTING=y
++CONFIG_RISCV_ACLINT=y
++CONFIG_SIFIVE_PLIC=y
 diff --git a/hw/riscv/litex_sim.c b/hw/riscv/litex_sim.c
 new file mode 100644
 index 0000000..cb0a3c1
 --- /dev/null
 +++ b/hw/riscv/litex_sim.c
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,575 @@
 +/*
 + * QEMU RISC-V LiteX SIM co-simulation machine
 + *
@@ -36,12 +40,17 @@ index 0000000..cb0a3c1
 +#include "exec/memory.h"
 +#include "hw/boards.h"
 +#include "hw/hw.h"
++#include "hw/intc/riscv_aclint.h"
++#include "hw/intc/sifive_plic.h"
++#include "hw/irq.h"
 +#include "hw/loader.h"
++#include "hw/qdev-properties.h"
 +#include "hw/riscv/riscv_hart.h"
 +#include "hw/sysbus.h"
 +#include "qemu/error-report.h"
 +#include "qemu/module.h"
 +#include "qemu/sockets.h"
++#include "qemu/timer.h"
 +#include "qemu/units.h"
 +#include "qom/object.h"
 +#include "target/riscv/cpu.h"
@@ -56,28 +65,50 @@ index 0000000..cb0a3c1
 +#define LITEX_SIM_VERSION   1
 +#define LITEX_SIM_OP_READ   0
 +#define LITEX_SIM_OP_WRITE  1
++#define LITEX_SIM_OP_IRQ    2
++#define LITEX_SIM_IRQ_BASE  0
++
++#define LITEX_SIM_PLIC_PRIORITY_BASE  0x000000
++#define LITEX_SIM_PLIC_PENDING_BASE   0x001000
++#define LITEX_SIM_PLIC_ENABLE_BASE    0x002000
++#define LITEX_SIM_PLIC_ENABLE_STRIDE  0x000080
++#define LITEX_SIM_PLIC_CONTEXT_BASE   0x200000
++#define LITEX_SIM_PLIC_CONTEXT_STRIDE 0x001000
++#define LITEX_SIM_PLIC_NUM_SOURCES    33
++#define LITEX_SIM_PLIC_NUM_PRIORITIES 7
 +
 +struct LiteXSimMachineState {
 +    MachineState parent;
 +
 +    RISCVHartArrayState cpus;
++    DeviceState *plic;
 +    MemoryRegion rom;
 +    MemoryRegion sram;
 +    MemoryRegion bridge;
++    QEMUTimer *irq_poll_timer;
 +
 +    char *bridge_host;
 +    uint32_t bridge_port;
 +    uint32_t xlen;
++    uint32_t timebase_freq;
++    uint32_t irq_poll_us;
 +    uint64_t reset_addr;
 +    uint64_t rom_base;
 +    uint64_t rom_size;
 +    uint64_t sram_base;
 +    uint64_t sram_size;
 +    uint64_t main_ram_base;
++    uint64_t bridge_base;
++    uint64_t bridge_size;
++    uint64_t clint_base;
++    uint64_t clint_size;
++    uint64_t plic_base;
++    uint64_t plic_size;
 +    uint64_t csr_base;
 +    uint64_t csr_size;
 +
 +    int bridge_fd;
++    bool bridge_busy;
 +    uint32_t irq_mask;
 +};
 +
@@ -130,11 +161,26 @@ index 0000000..cb0a3c1
 +
 +static void litex_sim_update_irq(LiteXSimMachineState *s, uint32_t irq_mask)
 +{
-+    bool level = irq_mask != 0;
++    uint32_t changed = s->irq_mask ^ irq_mask;
++    int irq;
 +
++    if (s->plic) {
++        for (irq = 0; irq < 32; irq++) {
++            uint32_t mask = 1u << irq;
++
++            if (changed & mask) {
++                qemu_set_irq(qdev_get_gpio_in(s->plic,
++                                              LITEX_SIM_IRQ_BASE + irq),
++                             !!(irq_mask & mask));
++            }
++        }
++    } else {
++        bool level = irq_mask != 0;
++
++        riscv_cpu_update_mip(&s->cpus.harts[0].env, MIP_MEIP,
++                             BOOL_TO_MASK(level));
++    }
 +    s->irq_mask = irq_mask;
-+    riscv_cpu_update_mip(&s->cpus.harts[0].env, MIP_MEIP,
-+                         BOOL_TO_MASK(level));
 +}
 +
 +static bool litex_sim_bridge_xfer_once(LiteXSimMachineState *s,
@@ -195,6 +241,7 @@ index 0000000..cb0a3c1
 +    uint64_t rdata = 0;
 +    uint16_t status = 0;
 +
++    s->bridge_busy = true;
 +    if (!litex_sim_bridge_xfer_once(s, op, addr, size, wdata,
 +                                    &rdata, &status, &err)) {
 +        error_free_or_abort(&err);
@@ -211,6 +258,7 @@ index 0000000..cb0a3c1
 +                 status, op == LITEX_SIM_OP_READ ? "read" : "write", addr);
 +    }
 +
++    s->bridge_busy = false;
 +    return rdata;
 +}
 +
@@ -219,7 +267,7 @@ index 0000000..cb0a3c1
 +    LiteXSimMachineState *s = opaque;
 +
 +    return litex_sim_bridge_xfer(s, LITEX_SIM_OP_READ,
-+                                 s->csr_base + addr, size, 0);
++                                 s->bridge_base + addr, size, 0);
 +}
 +
 +static void litex_sim_mmio_write(void *opaque, hwaddr addr,
@@ -228,7 +276,7 @@ index 0000000..cb0a3c1
 +    LiteXSimMachineState *s = opaque;
 +
 +    litex_sim_bridge_xfer(s, LITEX_SIM_OP_WRITE,
-+                          s->csr_base + addr, size, value);
++                          s->bridge_base + addr, size, value);
 +}
 +
 +static const MemoryRegionOps litex_sim_mmio_ops = {
@@ -261,6 +309,82 @@ index 0000000..cb0a3c1
 +
 +    g_free(s->bridge_host);
 +    s->bridge_host = g_strdup(value);
++}
++
++static void litex_sim_schedule_irq_poll(LiteXSimMachineState *s)
++{
++    if (s->irq_poll_timer && s->irq_poll_us) {
++        timer_mod(s->irq_poll_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  (int64_t)s->irq_poll_us * 1000);
++    }
++}
++
++static void litex_sim_irq_poll_cb(void *opaque)
++{
++    LiteXSimMachineState *s = opaque;
++    Error *err = NULL;
++    uint64_t rdata = 0;
++    uint16_t status = 0;
++
++    if (!s->bridge_busy) {
++        s->bridge_busy = true;
++        if (!litex_sim_bridge_xfer_once(s, LITEX_SIM_OP_IRQ, 0, 0, 0,
++                                        &rdata, &status, &err)) {
++            if (err) {
++                error_free(err);
++            }
++            litex_sim_close_bridge(s);
++        }
++        s->bridge_busy = false;
++    }
++
++    litex_sim_schedule_irq_poll(s);
++}
++
++static DeviceState *litex_sim_create_plic(LiteXSimMachineState *s)
++{
++    char *hart_config = g_strdup("MS");
++    DeviceState *plic;
++
++    plic = sifive_plic_create(
++        s->plic_base,
++        hart_config,
++        1,
++        0,
++        LITEX_SIM_PLIC_NUM_SOURCES,
++        LITEX_SIM_PLIC_NUM_PRIORITIES,
++        LITEX_SIM_PLIC_PRIORITY_BASE,
++        LITEX_SIM_PLIC_PENDING_BASE,
++        LITEX_SIM_PLIC_ENABLE_BASE,
++        LITEX_SIM_PLIC_ENABLE_STRIDE,
++        LITEX_SIM_PLIC_CONTEXT_BASE,
++        LITEX_SIM_PLIC_CONTEXT_STRIDE,
++        s->plic_size);
++    g_free(hart_config);
++    return plic;
++}
++
++static void litex_sim_create_local_interrupts(LiteXSimMachineState *s)
++{
++    riscv_aclint_swi_create(s->clint_base, 0, 1, false);
++    riscv_aclint_mtimer_create(
++        s->clint_base + RISCV_ACLINT_SWI_SIZE,
++        RISCV_ACLINT_DEFAULT_MTIMER_SIZE,
++        0,
++        1,
++        RISCV_ACLINT_DEFAULT_MTIMECMP,
++        RISCV_ACLINT_DEFAULT_MTIME,
++        s->timebase_freq,
++        true);
++
++    s->plic = litex_sim_create_plic(s);
++
++    if (s->irq_poll_us) {
++        s->irq_poll_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
++                                         litex_sim_irq_poll_cb, s);
++        litex_sim_schedule_irq_poll(s);
++    }
 +}
 +
 +static void litex_sim_board_init(MachineState *machine)
@@ -297,6 +421,8 @@ index 0000000..cb0a3c1
 +                            s->reset_addr, &error_abort);
 +    sysbus_realize(SYS_BUS_DEVICE(&s->cpus), &error_fatal);
 +
++    litex_sim_create_local_interrupts(s);
++
 +    memory_region_init_rom(&s->rom, NULL, "litex.rom",
 +                           s->rom_size, &error_fatal);
 +    memory_region_add_subregion(system_memory, s->rom_base, &s->rom);
@@ -316,8 +442,9 @@ index 0000000..cb0a3c1
 +    memory_region_add_subregion(system_memory, s->main_ram_base, machine->ram);
 +
 +    memory_region_init_io(&s->bridge, NULL, &litex_sim_mmio_ops, s,
-+                          "litex.bridge", s->csr_size);
-+    memory_region_add_subregion(system_memory, s->csr_base, &s->bridge);
++                          "litex.bridge", s->bridge_size);
++    memory_region_add_subregion_overlap(system_memory, s->bridge_base,
++                                        &s->bridge, -1);
 +}
 +
 +static void litex_sim_machine_instance_init(Object *obj)
@@ -328,14 +455,40 @@ index 0000000..cb0a3c1
 +    s->bridge_port  = 1235;
 +    s->bridge_fd    = -1;
 +    s->xlen         = sizeof(target_ulong) == 8 ? 64 : 32;
++    s->timebase_freq = RISCV_ACLINT_DEFAULT_TIMEBASE_FREQ;
++    s->irq_poll_us  = 1000;
++
++#if defined(TARGET_RISCV64)
++    s->reset_addr   = 0x10000000;
++    s->rom_base     = 0x10000000;
++    s->rom_size     = 0x00020000;
++    s->sram_base    = 0x11000000;
++    s->sram_size    = 0x00002000;
++    s->main_ram_base = 0x80000000;
++    s->bridge_base  = 0x12000000;
++    s->bridge_size  = 0x6e000000;
++    s->clint_base   = 0x02000000;
++    s->clint_size   = 0x00010000;
++    s->plic_base    = 0x0c000000;
++    s->plic_size    = 0x00400000;
++    s->csr_base     = 0x12000000;
++    s->csr_size     = 0x00010000;
++#else
 +    s->reset_addr   = 0x00000000;
 +    s->rom_base     = 0x00000000;
 +    s->rom_size     = 0x00020000;
 +    s->sram_base    = 0x10000000;
 +    s->sram_size    = 0x00002000;
 +    s->main_ram_base = 0x40000000;
++    s->bridge_base  = 0x80000000;
++    s->bridge_size  = 0x80000000;
++    s->clint_base   = 0xf0010000;
++    s->clint_size   = 0x00010000;
++    s->plic_base    = 0xf0c00000;
++    s->plic_size    = 0x00400000;
 +    s->csr_base     = 0xf0000000;
 +    s->csr_size     = 0x00010000;
++#endif
 +
 +    object_property_add_str(obj, "bridge-host",
 +                            litex_sim_get_bridge_host,
@@ -347,8 +500,16 @@ index 0000000..cb0a3c1
 +                                   OBJ_PROP_FLAG_READWRITE);
 +    object_property_set_description(obj, "bridge-port",
 +                                    "LiteX bridge TCP port");
++    object_property_add_uint32_ptr(obj, "irq-poll-us",
++                                   &s->irq_poll_us,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_set_description(obj, "irq-poll-us",
++                                    "LiteX IRQ bridge polling interval in us");
 +    object_property_add_uint32_ptr(obj, "xlen",
 +                                   &s->xlen,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint32_ptr(obj, "timebase-freq",
++                                   &s->timebase_freq,
 +                                   OBJ_PROP_FLAG_READWRITE);
 +    object_property_add_uint64_ptr(obj, "reset-addr",
 +                                   &s->reset_addr,
@@ -368,6 +529,24 @@ index 0000000..cb0a3c1
 +    object_property_add_uint64_ptr(obj, "main-ram-base",
 +                                   &s->main_ram_base,
 +                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "bridge-base",
++                                   &s->bridge_base,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "bridge-size",
++                                   &s->bridge_size,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "clint-base",
++                                   &s->clint_base,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "clint-size",
++                                   &s->clint_size,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "plic-base",
++                                   &s->plic_base,
++                                   OBJ_PROP_FLAG_READWRITE);
++    object_property_add_uint64_ptr(obj, "plic-size",
++                                   &s->plic_size,
++                                   OBJ_PROP_FLAG_READWRITE);
 +    object_property_add_uint64_ptr(obj, "csr-base",
 +                                   &s->csr_base,
 +                                   OBJ_PROP_FLAG_READWRITE);
@@ -380,6 +559,10 @@ index 0000000..cb0a3c1
 +{
 +    LiteXSimMachineState *s = LITEX_SIM_MACHINE(obj);
 +
++    if (s->irq_poll_timer) {
++        timer_del(s->irq_poll_timer);
++        timer_free(s->irq_poll_timer);
++    }
 +    litex_sim_close_bridge(s);
 +    g_free(s->bridge_host);
 +}

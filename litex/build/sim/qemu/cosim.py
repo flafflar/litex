@@ -79,6 +79,7 @@ def qemu_add_args(parser):
     parser.add_argument("--qemu-no-shared-ram",   action="store_true", help="Disable shared QEMU/Verilator backing for integrated main RAM.")
     parser.add_argument("--qemu-extra-args",   default="", help="Extra arguments appended to the QEMU command line.")
     parser.add_argument("--qemu-wait-timeout", default=120.0, type=float, help="Seconds to wait for the QEMU transaction bridge before launching QEMU; <= 0 waits forever.")
+    parser.add_argument("--qemu-irq-poll-us",  default=1000, type=int, help="QEMU-side LiteX IRQ polling interval in microseconds; 0 disables polling.")
     parser.add_argument("--qemu-no-run",       action="store_true", help="Do not auto-launch QEMU when using --cpu-type=qemu.")
 
 
@@ -164,15 +165,29 @@ def qemu_machine_arg(soc, args):
             return soc.bus.regions[name].size
         return default
 
+    def bridge_region():
+        if soc.cpu.io_regions:
+            return sorted(soc.cpu.io_regions.items())[0]
+        return region_origin("csr"), region_size("csr")
+
+    bridge_base, bridge_size = bridge_region()
     props = [
         "litex-sim",
         "xlen={}".format(qemu_xlen(qemu_variant(args))),
         "bridge-host={}".format(args.qemu_bind),
         "bridge-port={}".format(args.qemu_port),
+        "bridge-base=0x{:x}".format(bridge_base),
+        "bridge-size=0x{:x}".format(bridge_size),
+        "irq-poll-us={}".format(args.qemu_irq_poll_us),
         "reset-addr=0x{:x}".format(getattr(soc.cpu, "reset_address", region_origin("rom"))),
         "rom-base=0x{:x}".format(region_origin("rom")),
         "sram-base=0x{:x}".format(region_origin("sram")),
         "main-ram-base=0x{:x}".format(region_origin("main_ram")),
+        "clint-base=0x{:x}".format(region_origin("clint")),
+        "clint-size=0x{:x}".format(region_size("clint", 0x1_0000)),
+        "plic-base=0x{:x}".format(region_origin("plic")),
+        "plic-size=0x{:x}".format(region_size("plic", 0x40_0000)),
+        "timebase-freq={}".format(getattr(soc, "sys_clk_freq", 1000000)),
         "csr-base=0x{:x}".format(region_origin("csr")),
         "csr-size=0x{:x}".format(region_size("csr")),
     ]

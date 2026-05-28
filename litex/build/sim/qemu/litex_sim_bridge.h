@@ -18,6 +18,7 @@
 enum litex_sim_qemu_op {
     LITEX_SIM_QEMU_OP_READ  = 0,
     LITEX_SIM_QEMU_OP_WRITE = 1,
+    LITEX_SIM_QEMU_OP_IRQ   = 2,
 };
 
 enum litex_sim_qemu_status {

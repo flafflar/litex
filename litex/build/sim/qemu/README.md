@@ -63,11 +63,13 @@ python3 -m litex.tools.litex_sim \
   --qemu-append "console=liteuart earlycon"
 ```
 
-This is the QEMU command-line plumbing needed for Linux bring-up. The current
-`litex-sim` QEMU machine is still intentionally minimal: it forwards LiteX MMIO
-through the bridge and raises a machine external interrupt when the LiteX IRQ
-mask is non-zero. A complete Linux board also needs a DTB, firmware/kernel
-placement, timer, and interrupt model that match the selected LiteX SoC.
+The `litex-sim` QEMU machine provides the RISC-V local interrupt pieces Linux
+expects: QEMU owns the ACLINT/CLINT timer/software interrupt block and the
+SiFive-compatible PLIC, while LiteX/Verilator owns the SoC peripherals. The
+bridge is mapped over the CPU IO window, so Linux can access non-CSR LiteX
+windows such as LiteEth MAC buffers or framebuffer regions in addition to the
+CSR window. Peripheral DMA to integrated main RAM requires the shared RAM path
+described below.
 
 ## Shared Main RAM
 
@@ -153,7 +155,10 @@ The LiteX launcher starts QEMU with:
 ```sh
 qemu-system-riscv32 \
   -M litex-sim,xlen=32,bridge-host=127.0.0.1,bridge-port=1235,\
+bridge-base=0x80000000,bridge-size=0x80000000,irq-poll-us=1000,\
 reset-addr=0x0,rom-base=0x0,sram-base=0x10000000,main-ram-base=0x40000000,\
+clint-base=0xf0010000,clint-size=0x10000,plic-base=0xf0c00000,plic-size=0x400000,\
+timebase-freq=1000000,\
 csr-base=0xf0000000,csr-size=0x10000 \
   -m 67108864B \
   -nographic -serial none -monitor none \
@@ -166,10 +171,13 @@ The QEMU `litex-sim` machine should:
 
 - Instantiate a RISC-V CPU matching `xlen`.
 - Own executable ROM/RAM locally inside QEMU.
-- Map the LiteX MMIO window as a QEMU `MemoryRegion`.
+- Own the RISC-V ACLINT/CLINT and PLIC windows locally inside QEMU.
+- Map the LiteX CPU IO window as a low-priority QEMU `MemoryRegion`.
 - Forward each MMIO read/write to the LiteX bridge protocol described below.
 - Treat non-zero bridge status as a bus error.
-- Update QEMU interrupt state from the `irq` field returned with each response.
+- Update QEMU PLIC inputs from the `irq` field returned with each response.
+- Poll the bridge with `op=2` when `irq-poll-us` is non-zero, so LiteX-originated
+  interrupts can wake QEMU even when the CPU is not otherwise touching MMIO.
 
 ## Protocol
 
@@ -182,8 +190,8 @@ Request, 32 bytes:
 |--------|---------|------|-------|
 | 0      | magic   | 4    | `0x3051584c` (`LXQ0`) |
 | 4      | version | 2    | `1` |
-| 6      | op      | 2    | `0` read, `1` write |
-| 8      | size    | 4    | `1`, `2`, `4`, or `8` |
+| 6      | op      | 2    | `0` read, `1` write, `2` IRQ poll |
+| 8      | size    | 4    | `1`, `2`, `4`, or `8`; `0` for IRQ poll |
 | 12     | reserved| 4    | `0` |
 | 16     | addr    | 8    | byte address |
 | 24     | data    | 8    | write data, little-endian |
@@ -199,3 +207,7 @@ Response, 32 bytes:
 | 12     | reserved| 4    | `0` |
 | 16     | data    | 8    | read data, little-endian |
 | 24     | reserved| 8    | `0` |
+
+For an IRQ poll request, QEMU sends `op=2`, `size=0`, `addr=0`, and `data=0`.
+The LiteX simulation module replies immediately without issuing a bus
+transaction; only the response `irq` mask is significant.

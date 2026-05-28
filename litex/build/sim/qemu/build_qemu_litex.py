@@ -215,6 +215,8 @@ def ensure_minimal_device_configs(args):
     config = "\n".join([
         "CONFIG_SEMIHOSTING=y",
         "CONFIG_ARM_COMPATIBLE_SEMIHOSTING=y",
+        "CONFIG_RISCV_ACLINT=y",
+        "CONFIG_SIFIVE_PLIC=y",
         "",
     ])
     targets = [target.strip() for target in args.targets.split(",") if target.strip()]

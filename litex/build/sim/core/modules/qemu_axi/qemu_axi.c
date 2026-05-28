@@ -27,6 +27,7 @@
 enum qemu_axi_op {
   QEMU_AXI_OP_READ  = 0,
   QEMU_AXI_OP_WRITE = 1,
+  QEMU_AXI_OP_IRQ   = 2,
 };
 
 enum qemu_axi_status {
@@ -319,8 +320,12 @@ static int qemu_axi_parse_request(struct session_s *s)
     return RC_ERROR;
   }
 
-  if ((op != QEMU_AXI_OP_READ && op != QEMU_AXI_OP_WRITE) ||
-      (size != 1 && size != 2 && size != 4 && size != 8)) {
+  if (op == QEMU_AXI_OP_IRQ) {
+    if (size != 0) {
+      return RC_ERROR;
+    }
+  } else if ((op != QEMU_AXI_OP_READ && op != QEMU_AXI_OP_WRITE) ||
+             (size != 1 && size != 2 && size != 4 && size != 8)) {
     return RC_ERROR;
   }
 
@@ -690,7 +695,10 @@ static int qemu_axi_tick(void *sess, uint64_t time_ps)
   }
 
   if (!s->active && s->req_valid) {
-    if (qemu_axi_build_txns(s) != RC_OK) {
+    if (s->req.op == QEMU_AXI_OP_IRQ) {
+      qemu_axi_send_response(s, QEMU_AXI_STATUS_OK, 0);
+      s->req_valid = 0;
+    } else if (qemu_axi_build_txns(s) != RC_OK) {
       qemu_axi_send_response(s, QEMU_AXI_STATUS_BAD_REQ, 0);
       s->req_valid = 0;
     } else {
