@@ -71,6 +71,68 @@ windows such as LiteEth MAC buffers or framebuffer regions in addition to the
 CSR window. Peripheral DMA to integrated main RAM requires the shared RAM path
 described below.
 
+## Etherbone Hardware-In-The-Loop
+
+The same QEMU bridge protocol can be forwarded to a real LiteX SoC over
+Etherbone. In this mode QEMU owns the CPU, ROM/RAM, ACLINT/CLINT and PLIC, and
+only the selected LiteX MMIO window is forwarded to hardware:
+
+```text
+QEMU litex-sim machine <-> litex_qemu_etherbone_bridge <-> Etherbone <-> LiteX SoC
+```
+
+Build the hardware-side SoC with the `qemu_remote` CPU facade and Etherbone:
+
+```sh
+python3 -m litex.tools.litex_sim \
+  --cpu-type=qemu_remote \
+  --cpu-variant=rv64 \
+  --with-etherbone \
+  --soc-csv=csr.csv \
+  --no-compile
+```
+
+For an end-to-end LiteX simulation endpoint, configure the usual `tap0`
+interface for the simulator side, then run the same command without
+`--no-compile`. The simulated SoC defaults to `192.168.1.50`, while the host
+side defaults to `192.168.1.100`.
+
+For a board target, use the same CPU type with the target's Ethernet PHY and
+Etherbone options. The `qemu_remote` CPU does not instantiate a hardware CPU
+bus master; it only provides the QEMU-compatible memory map, IRQ allocation,
+and small CSRs exposing the current interrupt bitmap and a latched reset
+request.
+
+Run the host bridge against the Etherbone endpoint:
+
+```sh
+python3 -m litex.tools.litex_qemu_etherbone_bridge \
+  --etherbone-host 192.168.1.50 \
+  --etherbone-port 1234 \
+  --csr-csv csr.csv
+```
+
+Then run patched QEMU with `bridge-host`/`bridge-port` pointing at the bridge.
+For RV64, the usual LiteX MMIO window starts at `0x12000000`:
+
+```sh
+build/qemu-litex/bin/qemu-system-riscv64 \
+  -M litex-sim,xlen=64,bridge-host=127.0.0.1,bridge-port=1235,\
+bridge-base=0x12000000,bridge-size=0x6e000000,irq-poll-us=1000,\
+reset-addr=0x10000000,rom-base=0x10000000,sram-base=0x11000000,\
+main-ram-base=0x80000000,clint-base=0x2000000,clint-size=0x10000,\
+plic-base=0xc000000,plic-size=0x400000,timebase-freq=1000000,\
+csr-base=0x12000000,csr-size=0x10000 \
+  -m 64M -nographic -serial none -monitor none \
+  -bios path/to/firmware.bin
+```
+
+This mode is intended for fast software/peripheral prototyping. CPU execution
+and main RAM stay in QEMU, so Linux can run quickly while drivers touch real
+peripheral CSRs and MMIO windows through Etherbone. FPGA DMA to QEMU-owned main
+RAM is not automatic; DMA-oriented tests should either use FPGA-resident buffer
+windows or a future host-memory/DMA proxy.
+
 ## Shared Main RAM
 
 When `--cpu-type=qemu` is used with `--integrated-main-ram-size`,
