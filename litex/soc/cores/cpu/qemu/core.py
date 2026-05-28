@@ -24,44 +24,36 @@ GCC_FLAGS = {
     "rv64": "-march=rv64i2p0_mac  -mabi=lp64 -mcmodel=medany ",
 }
 
-# QEMU ---------------------------------------------------------------------------------------------
+# Helpers ------------------------------------------------------------------------------------------
 
 def _get_qemu_bus_standard(platform):
     return getattr(platform, "qemu_bus_standard", "wishbone")
 
 
-def _wishbone_master_to_bus(module, wishbone_bus, bus_standard):
+def _qemu_bus_interface(bus_standard):
     if bus_standard == "wishbone":
-        return wishbone_bus
+        return wishbone.Interface(data_width=32, address_width=32, addressing="word")
 
     if bus_standard == "axi-lite":
-        axi_lite_bus = axi.AXILiteInterface(data_width=32, address_width=32)
-        module.submodules += axi.Wishbone2AXILite(wishbone_bus, axi_lite_bus)
-        return axi_lite_bus
+        return axi.AXILiteInterface(data_width=32, address_width=32)
 
     if bus_standard == "axi":
-        axi_bus = axi.AXIInterface(data_width=32, address_width=32)
-        module.submodules += axi.Wishbone2AXI(wishbone_bus, axi_bus)
-        return axi_bus
+        return axi.AXIInterface(data_width=32, address_width=32)
 
     raise ValueError("Unsupported QEMU bus standard: {}.".format(bus_standard))
 
 
-def _bus_to_wishbone_slave(module, wishbone_bus, bus_standard):
-    if bus_standard == "wishbone":
-        return wishbone_bus
+def _qemu_bus_pad_name(bus_standard, shared_ram=False):
+    names = {
+        "wishbone" : "qemu_shared_ram"          if shared_ram else "qemu_wishbone",
+        "axi-lite" : "qemu_axi_lite_shared_ram" if shared_ram else "qemu_axi_lite",
+        "axi"      : "qemu_axi_shared_ram"      if shared_ram else "qemu_axi",
+    }
+    if bus_standard not in names:
+        raise ValueError("Unsupported QEMU bus standard: {}.".format(bus_standard))
+    return names[bus_standard]
 
-    if bus_standard == "axi-lite":
-        axi_lite_bus = axi.AXILiteInterface(data_width=32, address_width=32)
-        module.submodules += axi.AXILite2Wishbone(axi_lite_bus, wishbone_bus)
-        return axi_lite_bus
-
-    if bus_standard == "axi":
-        axi_bus = axi.AXIInterface(data_width=32, address_width=32)
-        module.submodules += axi.AXI2Wishbone(axi_bus, wishbone_bus)
-        return axi_bus
-
-    raise ValueError("Unsupported QEMU bus standard: {}.".format(bus_standard))
+# QEMU ---------------------------------------------------------------------------------------------
 
 
 class QEMU(CPU):
@@ -85,11 +77,8 @@ class QEMU(CPU):
         self.xlen     = 64 if variant == "rv64" else 32
         self.reset    = Signal()
 
-        # The Verilator/QEMU socket module uses single-beat 32-bit Wishbone
-        # transactions. Expose the CPU-side LiteX bus in the requested SoC bus
-        # standard so AXI/AXI-Lite interconnects see a native master.
-        self.wishbone = wishbone.Interface(data_width=32, address_width=32, addressing="word")
-        self.bus      = _wishbone_master_to_bus(self, self.wishbone, _get_qemu_bus_standard(platform))
+        self.bus_standard = _get_qemu_bus_standard(platform)
+        self.bus          = _qemu_bus_interface(self.bus_standard)
         self.periph_buses = [self.bus]
         self.memory_buses = []
 
@@ -122,7 +111,7 @@ class QEMU(CPU):
             }
             self.io_regions = {0x8000_0000: 0x8000_0000}
 
-        self._add_sim_pads(platform)
+        self._add_sim_pads(platform, _qemu_bus_pad_name(self.bus_standard))
 
     @property
     def gcc_flags(self):
@@ -131,25 +120,10 @@ class QEMU(CPU):
         flags += "-D__qemu__ -DUART_POLLING "
         return flags
 
-    def _add_sim_pads(self, platform):
-        wb = self.wishbone
-        platform.add_extension([
-            ("qemu_wishbone", 0,
-                Subsignal("adr",   Pins(len(wb.adr))),
-                Subsignal("dat_w", Pins(len(wb.dat_w))),
-                Subsignal("dat_r", Pins(len(wb.dat_r))),
-                Subsignal("sel",   Pins(len(wb.sel))),
-                Subsignal("cyc",   Pins(1)),
-                Subsignal("stb",   Pins(1)),
-                Subsignal("ack",   Pins(1)),
-                Subsignal("we",    Pins(1)),
-                Subsignal("cti",   Pins(len(wb.cti))),
-                Subsignal("bte",   Pins(len(wb.bte))),
-                Subsignal("err",   Pins(1)),
-            ),
-            ("qemu_irq", 0, Pins(len(self.interrupt))),
-        ])
-        self.comb += wb.connect_to_pads(platform.request("qemu_wishbone"), mode="slave")
+    def _add_sim_pads(self, platform, name):
+        platform.add_extension(self.bus.get_ios(name))
+        platform.add_extension([("qemu_irq", 0, Pins(len(self.interrupt)))])
+        self.comb += self.bus.connect_to_pads(platform.request(name), mode="slave")
         self.comb += platform.request("qemu_irq").eq(self.interrupt)
 
     def set_reset_address(self, reset_address):
@@ -161,26 +135,11 @@ class QEMU(CPU):
 # QEMU Shared RAM ----------------------------------------------------------------------------------
 
 class QEMUSharedRAM(LiteXModule):
-    def __init__(self, platform, name="qemu_shared_ram", bus_standard="wishbone"):
-        self.wishbone = wishbone.Interface(data_width=32, address_width=32, addressing="word")
-        self.bus      = _bus_to_wishbone_slave(self, self.wishbone, bus_standard)
+    def __init__(self, platform, name=None, bus_standard="wishbone"):
+        name     = _qemu_bus_pad_name(bus_standard, shared_ram=True) if name is None else name
+        self.bus = _qemu_bus_interface(bus_standard)
         self._add_sim_pads(platform, name)
 
     def _add_sim_pads(self, platform, name):
-        wb = self.wishbone
-        platform.add_extension([
-            (name, 0,
-                Subsignal("adr",   Pins(len(wb.adr))),
-                Subsignal("dat_w", Pins(len(wb.dat_w))),
-                Subsignal("dat_r", Pins(len(wb.dat_r))),
-                Subsignal("sel",   Pins(len(wb.sel))),
-                Subsignal("cyc",   Pins(1)),
-                Subsignal("stb",   Pins(1)),
-                Subsignal("ack",   Pins(1)),
-                Subsignal("we",    Pins(1)),
-                Subsignal("cti",   Pins(len(wb.cti))),
-                Subsignal("bte",   Pins(len(wb.bte))),
-                Subsignal("err",   Pins(1)),
-            ),
-        ])
-        self.comb += wb.connect_to_pads(platform.request(name), mode="master")
+        platform.add_extension(self.bus.get_ios(name))
+        self.comb += self.bus.connect_to_pads(platform.request(name), mode="master")

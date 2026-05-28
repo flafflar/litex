@@ -99,13 +99,31 @@ def qemu_configure(args, parser, soc_kwargs):
 
 # Simulation Modules -------------------------------------------------------------------------------
 
+def qemu_bridge_module(bus_standard):
+    return {
+        "wishbone" : ("qemu_wishbone", "qemu_wishbone"),
+        "axi-lite" : ("qemu_axi_lite", "qemu_axi_lite"),
+        "axi"      : ("qemu_axi", "qemu_axi"),
+    }[bus_standard]
+
+
+def qemu_shared_ram_module(bus_standard):
+    return {
+        "wishbone" : ("qemu_shared_ram", "qemu_shared_ram"),
+        "axi-lite" : ("qemu_axi_lite_shared_ram", "qemu_axi_lite_shared_ram"),
+        "axi"      : ("qemu_axi_shared_ram", "qemu_axi_shared_ram"),
+    }[bus_standard]
+
+
 def qemu_add_sim_modules(sim_config, args, parser):
-    sim_config.add_module("qemu_wishbone", ["qemu_wishbone", "qemu_irq"], clocks="sys_clk", args={
+    qemu_module, qemu_interface = qemu_bridge_module(args.bus_standard)
+    sim_config.add_module(qemu_module, [qemu_interface, "qemu_irq"], clocks="sys_clk", args={
         "bind" : args.qemu_bind,
         "port" : args.qemu_port,
     })
     if args.qemu_shared_ram_enabled:
-        sim_config.add_module("qemu_shared_ram", "qemu_shared_ram", clocks="sys_clk", args={
+        ram_module, ram_interface = qemu_shared_ram_module(args.bus_standard)
+        sim_config.add_module(ram_module, ram_interface, clocks="sys_clk", args={
             "path" : args.qemu_shared_ram_path_resolved,
             "size" : args.integrated_main_ram_size,
         })
